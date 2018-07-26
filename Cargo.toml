@@ -1,0 +1,6 @@
+[package]
+name = "lin_eq_solver"
+version = "0.1.0"
+authors = ["anton"]
+
+[dependencies]

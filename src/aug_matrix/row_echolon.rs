@@ -1,100 +1,149 @@
-use std::fmt::{self, Display};
+use std::fmt::{self, Debug, Display};
 use num_traits::identities::Zero;
-use std::ops::{Deref, DerefMut};
-use std::ops::{Div, Mul, Sub};
+use num_traits::ops::inv::Inv;
+use std::ops::*;
 use super::*;
+use super::access_traits::*;
 
 #[derive(Debug, Clone)]
-pub struct RowEcholon<M>(Matrix<M>);
-newtype_derive!(RowEcholon<M> [Matrix<M>], M);
+pub struct RowEcholon<M>(M);
 
 #[derive(Debug, Clone)]
-pub struct ReducedRowEcholon<M>(RowEcholon<M>);
-newtype_derive!(ReducedRowEcholon<M> [RowEcholon<M>], M);
+pub struct ReducedRowEcholon<M>(M);
 
-fn _normalize_row<M: Zero + Clone + Div<Output=M>>(matrix: &mut Matrix<M>, row: usize) {
-    let new_row: Vec<M> = {
-        let r: &Vec<M> = (*matrix).get(row).expect("invalid matrix");
-        let factor: &M = r.get(row).expect("invalid matrix");
+#[derive(Debug, Clone)]
+pub struct SquareMatrix<M>(M);
 
-        if factor.is_zero() {
-            r.clone()
-        } else {
-            r.iter().cloned().map(|v| {
-                v / factor.clone()
-            }).collect()
-        }
-    };
-    *((*matrix).get_mut(row).expect("invalid matrix")) = new_row;
-}
-fn _substract_following_rows<M: Clone + Mul<Output=M> + Sub<Output=M>>(matrix: &mut Matrix<M>, row: usize) {
-    let mut row_iter = (*matrix).iter_mut().skip(row);
-    let r: &Vec<M> = row_iter.next().expect("invalid matrix");
-    for mut curr in row_iter {
-        let new_row: Vec<M> = {
-            let factor = curr.get(row).expect("invalid matrix");
-            let new_row: Vec<M> = curr.iter().cloned()
-                .zip(r.clone())
-                .map(|(v, vr)| { vr * factor.clone() - v})
-                .collect();
-            new_row
-        };
-        *curr = new_row;
-    }
-}
+/* ---------------------------- */
+/* ------- ROW ECHELON  ------- */
+/* ---------------------------- */
 
 // Matrix => RowEcholon
-// impl<M: NumOps + NumAssignOps + Clone + fmt::Debug + Zero> From<Matrix<M>> for RowEcholon<M> {
-impl<M> From<Matrix<M>> for RowEcholon<M>
-    where M: Clone + Mul<Output=M> + Sub<Output=M> + Div<Output=M> + Zero
+impl<M> From<M> for RowEcholon<M>
+    where M: MatrixRowOps + Debug,
+          M::Mv: Clone + Zero + Debug +
+            Div<Output=M::Mv> +
+            Inv<Output=M::Mv> +
+            Neg<Output=M::Mv>
 {
-    fn from(mut m: Matrix<M>) -> Self {
+    fn from(mut m: M) -> Self {
         // -1 because last column is extra vector and not part of the matrix
-        let col_count: usize = (*m).get(0).expect("invalid matrix").len() - 1;
+        let col_count: usize = m.inner()[0].len() - 1;
+        let row_count: usize = m.inner().len();
         for i in 0..col_count {
-            _normalize_row(&mut m, i);
-            _substract_following_rows(&mut m, i);
+            // 1. normalize row
+            let lead_coeff: M::Mv = m.inner()[i][i].clone();
+            if lead_coeff.is_zero() {
+                // TODO: handle lead_coeff == 0 case
+            } else {
+                m.scale_row(i, &lead_coeff.inv())
+            }
+
+            // substract following rows
+            for row in (i+1)..row_count {
+                let neg_row_lead_coeff: M::Mv = -m.inner()[row][i].clone();
+                m.add_scaled_row(row, i, &neg_row_lead_coeff);
+            }
         }
         RowEcholon(m)
     }
 }
-
-// RowEcholon => ReducedRowEcholon
-impl<M: Clone + Mul<Output=M> + Sub<Output=M>> From<RowEcholon<M>> for ReducedRowEcholon<M> {
-    fn from(mut re: RowEcholon<M>) -> Self {
-        for i in (0..re.len()).rev() {
-            re._substract_preceding_rows(i);
-        }
-        ReducedRowEcholon(re)
+impl<M> RowEcholon<M>
+    where M: MatrixRowOps,
+          M::Mv: Zero
+{
+    pub fn is_solvable(&self) -> bool {
+        let non_zero_rows_count: usize = self.0.inner().iter()
+            .filter(|row| {
+                !row.iter().all(|v| v.is_zero())
+            })
+            .count();
+        let col_count: usize = self.0.inner()[0].len() - 1;
+        // matrix is only solvable if there are exactly as many non-zero
+        // rows as there are columns
+        non_zero_rows_count == col_count
     }
 }
-
-impl<M: Clone + Mul<Output=M> + Sub<Output=M>> RowEcholon<M> {
-    fn _substract_preceding_rows(&mut self, row: usize) {
-        let r: Vec<M> = self.0.get(row).expect("invalid matrix").clone();
-        for mut curr in self.0.iter_mut().take(row) {
-            let new_row: Vec<M> = {
-                let factor = curr.get(row).expect("invalid matrix");
-
-                curr.iter().cloned()
-                    .zip(r.clone())
-                    .map(|(v, vr)| { v - vr * factor.clone() })
-                    .collect()
-            };
-            *curr = new_row;
-        }
-    }
-}
-
 impl<M: Display> Display for RowEcholon<M> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let matrix: &Matrix<M> = &**self;
+        let matrix: &M = &self.0;
         matrix.fmt(f)
+    }
+}
+
+
+/* ---------------------------- */
+/* ------ SQUARE MATRIX  ------ */
+/* ---------------------------- */
+
+// RowEcholon => SquareMatrix
+impl<M> SquareMatrix<M>
+    where M: MatrixRowOps + MatrixToSquare,
+          M::Mv: Clone + Zero
+{
+    pub fn try_from_row_echolon(mut m: RowEcholon<M>) -> Option<SquareMatrix<M>>
+    {
+        let col_count: usize = m.0.inner()[0].len() - 1;
+
+        let is_valid_square_matrix: bool = m.0.inner()
+            .iter()
+            .cloned()
+            .take(col_count)
+            .all(|row| {
+                !row.iter().all(|v| v.is_zero())
+            });
+
+        if is_valid_square_matrix {
+            m.0.crop_matrix();
+            Some(SquareMatrix(m.0))
+        } else {
+            None
+        }
+    }
+}
+impl<M: Display> Display for SquareMatrix<M> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let matrix: &M = &self.0;
+        matrix.fmt(f)
+    }
+}
+
+/* ---------------------------- */
+/* --- REDUCED ROW ECHELON  --- */
+/* ---------------------------- */
+
+// SquareMatrix => ReducedRowEcholon
+impl<M> From<SquareMatrix<M>> for ReducedRowEcholon<M>
+    where M: MatrixRowOps,
+          M::Mv: Clone + Neg<Output=M::Mv> + Debug + Zero + Mul<Output=M::Mv>,
+{
+    fn from(mut re: SquareMatrix<M>) -> ReducedRowEcholon<M> {
+        // -1 because last row is vector of augmented matrix
+        let num_cols: usize = re.0.inner()[0].len() - 1;
+        // num_cols..1, because first row has no preceding rows => can be skipped
+        for col in (0..num_cols).rev() {
+            for row in 0..col {
+                let neg_coeff: M::Mv = -re.0.inner()[row][col].clone();
+                re.0.add_scaled_row(row, col, &neg_coeff);
+            }
+        }
+        ReducedRowEcholon(re.0)
+    }
+}
+impl<M> ReducedRowEcholon<M>
+    where M: MatrixRowOps,
+          M::Mv: Clone
+{
+    pub fn solve(&self) -> Vec<M::Mv> {
+        let last_col: usize = self.0.inner()[0].len() - 1;
+        self.0.inner().iter().map(|row| {
+            row[last_col].clone()
+        }).collect()
     }
 }
 impl<M: Display> Display for ReducedRowEcholon<M> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let matrix: &RowEcholon<M> = &**self;
+        let matrix: &M = &self.0;
         matrix.fmt(f)
     }
 }
